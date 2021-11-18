@@ -9,16 +9,22 @@ void sort(int* arr, int n, int t);
 void swap(int* arr, int i, int j);
 int step(int* arr, int n, int t, int start);
 void* evaluate(void* arg);
+void* evaluateControl(void* arg);
 int min(int a, int b);
 
 struct params {
     int offset;
     int count;
     int n;
+    int index;
     int* arr;
 };
 
-pthread_barrier_t barrier;
+pthread_barrier_t barrierOdd;
+pthread_barrier_t barrierEven;
+pthread_barrier_t barrierProceed;
+int sorted = 0;
+int* changed;
 
 int main(int argc, char **argv)
 {
@@ -36,15 +42,13 @@ int main(int argc, char **argv)
     int* arr = generate(n);
     for (int i = 0; i < t; i++) {
         int ti = (i + 1) * n / t - i * n / t;
-        printf("at %d = %d\n", i, ti);
     }
     printf("Starting sort\n");
 
-    // print(arr, n);
     time_t start = time(NULL);
     sort(arr, n, t);
     time_t end = time(NULL);
-    // print(arr, n);
+
     printf("Sort took %ld seconds.\n", end - start);
     return 0;
 }
@@ -52,17 +56,47 @@ int main(int argc, char **argv)
 void* evaluate(void* arg) {
     struct params p = *((struct params*) arg);
 
-    int *changed = (int *)malloc(sizeof(int));
-    *changed = 0;
-    for (int i = p.offset; i < min(p.offset + p.count + p.count % 2, p.n - 1); i += 2) {
-        // printf("Comparing %d %d : %d < %d\n", i, i + 1, p.arr[i], p.arr[i + 1]);
-        if (p.arr[i] > p.arr[i + 1]) {
-            swap(p.arr, i, i + 1);
-            *changed = 1;
+    while(!sorted) {
+        int threadChanged = step(p.arr, p.n, p.offset, p.count);
+
+        pthread_barrier_wait(&barrierOdd);
+
+        threadChanged |= step(p.arr, p.n, p.offset + 1, p.count);
+
+        if (threadChanged) {
+            changed[p.index] = 1;
         }
+        pthread_barrier_wait(&barrierEven);
+
+        pthread_barrier_wait(&barrierProceed);
     }
-    pthread_barrier_wait(&barrier);
-    pthread_exit(changed);
+
+    return nullptr;
+}
+
+void* evaluateControl(void* arg) {
+    int t = *((int*) arg);
+
+    while(!sorted) {
+        pthread_barrier_wait(&barrierOdd);
+
+        pthread_barrier_wait(&barrierEven);
+
+        int anyChanged = 0;
+        for (int i = 0; i < t; i++) {
+            if (changed[i]) {
+                anyChanged = 1;
+                changed[i] = 0;
+            }
+        }
+        if (!anyChanged) {
+            sorted = 1;
+        }
+
+        pthread_barrier_wait(&barrierProceed);
+        
+    }
+
     return nullptr;
 }
 
@@ -82,57 +116,48 @@ void print(int* arr, int n) {
 }
 
 void sort(int* arr, int n, int t) {
-    int sorted = 0;
-    while(!sorted) {
-        sorted = 1 - (step(arr, n, t, 0) | step(arr, n, t, 1));
-    }
-}
-
-int step(int* arr, int n, int t, int start) {
-    int changed = 0;
-    int offset = start;
-
-    pthread_barrier_init(&barrier, NULL, t);
-
     pthread_t threads[t];
+    pthread_t controlThread;
+
+    pthread_barrier_init(&barrierOdd, NULL, t + 1);
+    pthread_barrier_init(&barrierEven, NULL, t + 1);
+    pthread_barrier_init(&barrierProceed, NULL, t + 1);
+
+    changed = (int *)calloc(t, sizeof(int));
+    for(int i = 0; i < t; i++) {
+        changed[i] = 0;
+    }
+
+    int offset = 0;
     for (int i = 0; i < t; i++) {
         int ti = (i + 1) * n / t - i * n / t;
         struct params* p = (struct params *)malloc(sizeof(struct params));
         p->offset = offset;
         p->count = ti;
         p->n = n;
+        p->index = i;
         p->arr = arr;
 
         pthread_create(&threads[i], NULL, evaluate, p);
         
-        // multiple loops per step
-        // for (int i = p.offset; i < min(p.offset + p.count + ti % 2, n - 1); i += 2) {
-        //     printf("Comparing %d %d : %d < %d\n", i, i + 1, arr[i], arr[i + 1]);
-        //     if (arr[i] > arr[i + 1]) {
-        //         swap(arr, i, i + 1);
-        //         changed = 1;
-        //     }
-        // }
         offset += ti;
     }
+    pthread_create(&controlThread, NULL, evaluateControl, &t);
 
-    // multithreaded step
     for (int i = 0; i < t; i++) {
-        void *result;
-        pthread_join(threads[i], &result);
-        int threadChanged = *((int*) result);
-        if (threadChanged) {
+        pthread_join(threads[i], NULL);
+    }
+    pthread_join(controlThread, NULL);
+}
+
+int step(int* arr, int n, int offset, int count) {
+    int changed = 0;
+    for (int i = offset; i < min(offset + count + count % 2, n - 1); i += 2) {
+        if (arr[i] > arr[i + 1]) {
+            swap(arr, i, i + 1);
             changed = 1;
         }
     }
-
-    // single loop per step
-    // for (int i = start; i < n - 1; i += 2) {
-    //     if (arr[i] > arr[i + 1]) {
-    //         swap(arr, i, i + 1);
-    //         changed = 1;
-    //     }
-    // }
     return changed;
 }
 
@@ -149,12 +174,18 @@ int min(int a, int b) {
 /*
 STATS:
 
-N = 1_000_000
+Optimisation with reduces phase count (iterates until phase has no changes)
+Complied with -O2 flag
+Ran on PC
+N = 100_000
 
 Threads[T] | Duration[s] | Speedup[-]
 -------------------------------------
-     1     |     48      |
-     2     |     29      |    1.65
+     1     |     12      |
+     2     |     10      |    1.2   
+     4     |     12      |    1
+     8     |     18      |    0.66
+     16    |     32      |    0.38
 
 
 */
