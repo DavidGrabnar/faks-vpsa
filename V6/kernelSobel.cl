@@ -25,10 +25,6 @@ __kernel void sobel_gpu(
     i = index / width;
     j = index % width;
 
-    int i, j;
-    int Gx, Gy;
-    int tempPixel;
-
     if (i < size) {
         Gx = -getPixel(image_in, i - 1, j - 1, width, height) - 2 * getPixel(image_in, i - 1, j, width, height) -
                 getPixel(image_in, i - 1, j + 1, width, height) + getPixel(image_in, i + 1, j - 1, width, height) +

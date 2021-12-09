@@ -46,8 +46,9 @@ void sobelCPU(unsigned char *image_in, unsigned char *image_out, int width, int 
         }
 }
 
-void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int height)
+void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int height, int pitch)
 {
+    int pitch_image_size = pitch * height;
     int image_size = width * height;
 
     char ch;
@@ -59,7 +60,6 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     char *source_str;
     size_t source_size;
 
-    printf("Reading CL\n");
     fp = fopen("kernelSobel.cl", "r");
     if (!fp)
     {
@@ -71,7 +71,6 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     source_str[source_size] = '\0';
     fclose(fp);
 
-    printf("Reading platform info\n");
     // Podatki o platformi
     cl_platform_id platform_id[10];
     cl_uint ret_num_platforms;
@@ -80,7 +79,6 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     ret = clGetPlatformIDs(10, platform_id, &ret_num_platforms);
     // max. "stevilo platform, kazalec na platforme, dejansko "stevilo platform
 
-    printf("Reading device info\n");
     // Podatki o napravi
     cl_device_id device_id[10];
     cl_uint ret_num_devices;
@@ -100,34 +98,29 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     cl_command_queue command_queue = clCreateCommandQueue(context, device_id[0], 0, &ret);
     // kontekst, naprava, INORDER/OUTOFORDER, napake
 
-    printf("Split work\n");
     // Delitev dela
     size_t local_item_size = WORKGROUP_SIZE;
     size_t num_groups = ((image_size - 1) / local_item_size + 1);
     size_t global_item_size = num_groups * local_item_size;
 
-    printf("Allocate memory\n");
     // Alokacija pomnilnika na napravi
-    cl_mem image_in_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY,
-                                             image_size * sizeof(unsigned char) * 4, NULL, &ret);
+    cl_mem image_in_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                             pitch_image_size * sizeof(unsigned char), image_in, &ret);
 
     cl_mem image_out_mem_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
-                                              image_size * sizeof(unsigned char) * 4, NULL, &ret);
+                                              pitch_image_size * sizeof(unsigned char), NULL, &ret);
 
-    printf("Prepare program\n");
     // Priprava programa
     cl_program program = clCreateProgramWithSource(context, 1, (const char **)&source_str,
                                                    NULL, &ret);
     // kontekst, "stevilo kazalcev na kodo, kazalci na kodo,
     // stringi so NULL terminated, napaka
 
-    printf("Build program\n");
     // Prevajanje
     ret = clBuildProgram(program, 1, &device_id[0], NULL, NULL, NULL);
     // program, "stevilo naprav, lista naprav, opcije pri prevajanju,
     // kazalec na funkcijo, uporabni"ski argumenti
 
-    printf("Get build info\n");
     // Log
     size_t build_log_len;
     char *build_log;
@@ -141,32 +134,38 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     printf("%s\n", build_log);
     free(build_log);
 
-    printf("Run\n");
     // "s"cepec: priprava objekta
     cl_kernel kernel = clCreateKernel(program, "sobel_gpu", &ret);
     // program, ime "s"cepca, napaka
 
-    printf("Arguments\n");
     // "s"cepec: argumenti
     ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&image_in_mem_obj);
     ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&image_out_mem_obj);
-    ret |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&height);
-    ret |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&width);
+    ret |= clSetKernelArg(kernel, 2, sizeof(cl_int), (void *)&width);
+    ret |= clSetKernelArg(kernel, 3, sizeof(cl_int), (void *)&height);
     ret |= clSetKernelArg(kernel, 4, sizeof(cl_int), (void *)&image_size);
     // "s"cepec, "stevilka argumenta, velikost podatkov, kazalec na podatke
 
+	clock_t run_time;
+	run_time = clock();
     // "s"cepec: zagon
     ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL,
                                  &global_item_size, &local_item_size, 0, NULL, NULL);
     // vrsta, "s"cepec, dimenzionalnost, mora biti NULL,
     // kazalec na "stevilo vseh niti, kazalec na lokalno "stevilo niti,
     // dogodki, ki se morajo zgoditi pred klicem
+	run_time = clock() - run_time;
+	printf("Elapsed run time: %f seconds\n", ((double)run_time)/CLOCKS_PER_SEC);
 
+	clock_t copy_result_time;
+	copy_result_time = clock();
     // Kopiranje rezultatov
     ret = clEnqueueReadBuffer(command_queue, image_out_mem_obj, CL_TRUE, 0,
-                              image_size * sizeof(unsigned char) * 4, image_out, 0, NULL, NULL);
+                              pitch_image_size * sizeof(unsigned char), image_out, 0, NULL, NULL);
     // branje v pomnilnik iz naparave, 0 = offset
     // zadnji trije - dogodki, ki se morajo zgoditi prej
+	copy_result_time = clock() - copy_result_time;
+	printf("Elapsed copy result time: %f seconds\n", ((double)copy_result_time)/CLOCKS_PER_SEC);
 
     // "ci"s"cenje
     ret = clFlush(command_queue);
@@ -181,7 +180,9 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
 
 int main(int argc, char *argv[])
 {
-    printf("Start\n");
+	clock_t t;
+	t = clock();
+
     //Initialize parameters
     int target_gpu = DEFAULT_TARGET_GPU;
     char *input_path = DEFAULT_INPUT_PATH;
@@ -199,20 +200,17 @@ int main(int argc, char *argv[])
     {
         output_path = argv[3];
     }
-        printf("will load memory\n");
 
     //Load image from file
     FIBITMAP *imageBitmap = FreeImage_Load(FIF_PNG, input_path, 0);
     //Convert it to an 8-bit grayscale image
     FIBITMAP *imageBitmap8 = FreeImage_ConvertTo8Bits(imageBitmap);
 
-    printf("Loaded memory\n");
     //Get image dimensions
     int width = FreeImage_GetWidth(imageBitmap8);
     int height = FreeImage_GetHeight(imageBitmap8);
     int pitch = FreeImage_GetPitch(imageBitmap8);
 
-    printf("Preparing memory\n");
     //Preapare room for a raw data copy of the image
     unsigned char *image_in = (unsigned char *)malloc(height * pitch * sizeof(unsigned char));
     FreeImage_ConvertToRawBits(image_in, imageBitmap8, pitch, 8, 0xFF, 0xFF, 0xFF, TRUE);
@@ -223,7 +221,7 @@ int main(int argc, char *argv[])
     if (target_gpu)
     {
         printf("Using GPU\n");
-        sobelGPU(image_in, image_out, width, height);
+        sobelGPU(image_in, image_out, width, height, pitch);
     }
     else
     {
@@ -235,6 +233,11 @@ int main(int argc, char *argv[])
     FIBITMAP *dst = FreeImage_ConvertFromRawBits(image_out, width, height, pitch,
                                                  8, 0xFF, 0xFF, 0xFF, TRUE);
     FreeImage_Save(FIF_PNG, dst, output_path, 0);
+
+    // calculate the elapsed time
+	t = clock() - t;
+	double time_taken = ((double)t)/CLOCKS_PER_SEC;
+	printf("Elapsed time: %f seconds\n", time_taken);
 
     return 0;
 }
