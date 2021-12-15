@@ -55,6 +55,9 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     int i;
     cl_int ret;
 
+	clock_t file_time;
+	file_time = clock();
+
     // Branje datoteke
     FILE *fp;
     char *source_str;
@@ -70,6 +73,12 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     source_size = fread(source_str, 1, MAX_SOURCE_SIZE, fp);
     source_str[source_size] = '\0';
     fclose(fp);
+
+	file_time = clock() - file_time;
+	printf("Elapsed file time: %f seconds\n", ((double)file_time)/CLOCKS_PER_SEC);
+
+	clock_t gpu_setup_time;
+	gpu_setup_time = clock();
 
     // Podatki o platformi
     cl_platform_id platform_id[10];
@@ -103,9 +112,15 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     size_t num_groups = ((image_size - 1) / local_item_size + 1);
     size_t global_item_size = num_groups * local_item_size;
 
+	clock_t copy_image_time;
+	copy_image_time = clock();
+
     // Alokacija pomnilnika na napravi
     cl_mem image_in_mem_obj = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                              pitch_image_size * sizeof(unsigned char), image_in, &ret);
+
+	copy_image_time = clock() - copy_image_time;
+	printf("Elapsed copy image time: %f seconds\n", ((double)copy_image_time)/CLOCKS_PER_SEC);
 
     cl_mem image_out_mem_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
                                               pitch_image_size * sizeof(unsigned char), NULL, &ret);
@@ -146,16 +161,20 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     ret |= clSetKernelArg(kernel, 4, sizeof(cl_int), (void *)&image_size);
     // "s"cepec, "stevilka argumenta, velikost podatkov, kazalec na podatke
 
-	clock_t run_time;
-	run_time = clock();
+	gpu_setup_time = clock() - gpu_setup_time;
+	printf("Elapsed gpu setup time: %f seconds\n", ((double)gpu_setup_time)/CLOCKS_PER_SEC);
+
+	clock_t program_run_time;
+	program_run_time = clock();
     // "s"cepec: zagon
     ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL,
                                  &global_item_size, &local_item_size, 0, NULL, NULL);
     // vrsta, "s"cepec, dimenzionalnost, mora biti NULL,
     // kazalec na "stevilo vseh niti, kazalec na lokalno "stevilo niti,
     // dogodki, ki se morajo zgoditi pred klicem
-	run_time = clock() - run_time;
-	printf("Elapsed run time: %f seconds\n", ((double)run_time)/CLOCKS_PER_SEC);
+
+	program_run_time = clock() - program_run_time;
+	printf("Elapsed program run time: %f seconds\n", ((double)program_run_time)/CLOCKS_PER_SEC);
 
 	clock_t copy_result_time;
 	copy_result_time = clock();
@@ -164,8 +183,12 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
                               pitch_image_size * sizeof(unsigned char), image_out, 0, NULL, NULL);
     // branje v pomnilnik iz naparave, 0 = offset
     // zadnji trije - dogodki, ki se morajo zgoditi prej
+    
 	copy_result_time = clock() - copy_result_time;
 	printf("Elapsed copy result time: %f seconds\n", ((double)copy_result_time)/CLOCKS_PER_SEC);
+
+	clock_t clear_time;
+	clear_time = clock();
 
     // "ci"s"cenje
     ret = clFlush(command_queue);
@@ -176,6 +199,9 @@ void sobelGPU(unsigned char *image_in, unsigned char *image_out, int width, int 
     ret = clReleaseMemObject(image_out_mem_obj);
     ret = clReleaseCommandQueue(command_queue);
     ret = clReleaseContext(context);
+
+	clear_time = clock() - clear_time;
+	printf("Elapsed clear time: %f seconds\n", ((double)clear_time)/CLOCKS_PER_SEC);
 }
 
 int main(int argc, char *argv[])
@@ -201,6 +227,9 @@ int main(int argc, char *argv[])
         output_path = argv[3];
     }
 
+	clock_t load_image_time;
+	load_image_time = clock();
+
     //Load image from file
     FIBITMAP *imageBitmap = FreeImage_Load(FIF_PNG, input_path, 0);
     //Convert it to an 8-bit grayscale image
@@ -217,6 +246,12 @@ int main(int argc, char *argv[])
 
     unsigned char *image_out = (unsigned char *)malloc(height * pitch * sizeof(unsigned char));
 
+	load_image_time = clock() - load_image_time;
+	printf("Elapsed load image time: %f seconds\n", ((double)load_image_time)/CLOCKS_PER_SEC);
+
+	clock_t sobel_run_time;
+	sobel_run_time = clock();
+
     //find edges
     if (target_gpu)
     {
@@ -229,15 +264,23 @@ int main(int argc, char *argv[])
         sobelCPU(image_in, image_out, width, height);
     }
 
+	sobel_run_time = clock() - sobel_run_time;
+	printf("Elapsed sobel run time: %f seconds\n", ((double)sobel_run_time)/CLOCKS_PER_SEC);
+
+	clock_t save_image_time;
+	save_image_time = clock();
+
     //save output image
     FIBITMAP *dst = FreeImage_ConvertFromRawBits(image_out, width, height, pitch,
                                                  8, 0xFF, 0xFF, 0xFF, TRUE);
     FreeImage_Save(FIF_PNG, dst, output_path, 0);
 
-    // calculate the elapsed time
+	save_image_time = clock() - save_image_time;
+	printf("Elapsed save image time: %f seconds\n", ((double)save_image_time)/CLOCKS_PER_SEC);
+
+    // calculate elapsed time
 	t = clock() - t;
-	double time_taken = ((double)t)/CLOCKS_PER_SEC;
-	printf("Elapsed time: %f seconds\n", time_taken);
+	printf("Elapsed total time: %f seconds\n", ((double)t)/CLOCKS_PER_SEC);
 
     return 0;
 }
