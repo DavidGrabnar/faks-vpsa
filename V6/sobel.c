@@ -284,3 +284,25 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+
+/*
+
+Meritve:
+------------
+
+Čas ~ povprečje 5 meritev
+
+ velikost (WxH) | Čas CPU (tc) [ms] | Čas GPU (tg) [ms]	| Čas prenosa vhod [ms]	| Čas prenosa izhod [ms]|  Pohitritev (S)
+---------------------------------------------------------------------------------------------------------------------------
+     640x480    |    	6,955     	|    	0,255     	|    	  0,171     	|    	0,342     	    |      27,27    
+     800x600    |      10,466     	|    	0,268     	|    	  0,270     	|    	0,505     	    |      39,05    
+    1600x900    |      31,743     	|    	0,683     	|    	  0,993     	|    	1,191     	    |      46,48    
+   1920x1080   	|      46,126     	|    	0,826     	|    	  1,391     	|    	1,663     	    |      55,84    
+   3840x2160   	|     182,288     	|    	1,967     	|    	  4,110     	|    	4,236     	    |      65,22    
+
+tc ~ čas obdelave z serijskim algoritmom na CPU
+tg ~ čas obdelave s paralelnim algoritmom na GPU (brez časa prenosa vhodne slike, časa prenosa izhodne slike, priprare programa itd.)
+
+S = tc/tg ~ pohitritev
+
+*/
