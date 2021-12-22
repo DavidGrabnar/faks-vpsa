@@ -5,10 +5,14 @@
 #include <CL/cl.h>
 #include <time.h>
 
-#define WORKGROUP_SIZE (512)
-#define MAX_SOURCE_SIZE 16384
 
 #define BINS 256
+
+#define WORKGROUP_SIZE (BINS)
+#define MAX_SOURCE_SIZE 16384
+
+#define DEFAULT_TARGET_GPU 1
+#define DEFAULT_INPUT_PATH "640x480.jpg"
 
 struct histogram
 {
@@ -19,7 +23,7 @@ struct histogram
 
 void histogramCPU(unsigned char *image_in, histogram H, int width, int height)
 {
-
+	printf("Running on CPU %d, %d\n", width, height);
 	//Each color channel is 1 byte long, there are 4 channels BLUE, GREEN, RED and ALPHA
 	//The order is BLUE|GREEN|RED|ALPHA for each pixel, we ignore the ALPHA channel when computing the histograms
 	for (int i = 0; i < (height); i++)
@@ -33,6 +37,8 @@ void histogramCPU(unsigned char *image_in, histogram H, int width, int height)
 
 void histogramGPU(unsigned char *image_in, histogram H, int width, int height, int pitch)
 {
+	printf("Running on GPU %d, %d, %d\n", width, height, pitch);
+
 	int pitch_image_size = pitch * height;
 	int image_size = width * height;
 
@@ -97,6 +103,7 @@ void histogramGPU(unsigned char *image_in, histogram H, int width, int height, i
 	size_t num_groups = ((image_size - 1) / local_item_size + 1);
 	size_t global_item_size = num_groups * local_item_size;
 
+	printf("Sizes: %d, %d\n", local_item_size, global_item_size);
 	clock_t copy_image_time;
 	copy_image_time = clock();
 
@@ -146,12 +153,10 @@ void histogramGPU(unsigned char *image_in, histogram H, int width, int height, i
 
 	// "s"cepec: argumenti
 	ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&image_in_mem_obj);
-	ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&r_out_mem_obj);
-	ret = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&g_out_mem_obj);
-	ret = clSetKernelArg(kernel, 3, sizeof(cl_mem), (void *)&b_out_mem_obj);
-	ret |= clSetKernelArg(kernel, 4, sizeof(cl_int), (void *)&width);
-	ret |= clSetKernelArg(kernel, 5, sizeof(cl_int), (void *)&height);
-	ret |= clSetKernelArg(kernel, 6, sizeof(cl_int), (void *)&image_size);
+	ret |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&r_out_mem_obj);
+	ret |= clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&g_out_mem_obj);
+	ret |= clSetKernelArg(kernel, 3, sizeof(cl_mem), (void *)&b_out_mem_obj);
+	ret |= clSetKernelArg(kernel, 4, sizeof(cl_int), (void *)&image_size);
 	// "s"cepec, "stevilka argumenta, velikost podatkov, kazalec na podatke
 
 	gpu_setup_time = clock() - gpu_setup_time;
@@ -219,11 +224,29 @@ void printHistogram(histogram H)
 	}
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+	clock_t t;
+	t = clock();
+
+    //Initialize parameters
+    int target_gpu = DEFAULT_TARGET_GPU;
+    char *input_path = DEFAULT_INPUT_PATH;
+
+    if (argc > 1 && !strcmp(argv[1], "0"))
+    {
+        target_gpu = 0;
+    }
+    if (argc > 2)
+    {
+        input_path = argv[2];
+    }
+
+	clock_t load_image_time;
+	load_image_time = clock();
 
 	//Load image from file
-	FIBITMAP *imageBitmap = FreeImage_Load(FIF_JPEG, "800x600.jpg", 0);
+	FIBITMAP *imageBitmap = FreeImage_Load(FIF_JPEG, input_path, 0);
 	//Convert it to a 32-bit image
 	FIBITMAP *imageBitmap32 = FreeImage_ConvertTo32Bits(imageBitmap);
 
@@ -247,10 +270,47 @@ int main(void)
 	FreeImage_Unload(imageBitmap32);
 	FreeImage_Unload(imageBitmap);
 
+	load_image_time = clock() - load_image_time;
+	printf("Elapsed load image time: %f seconds\n", ((double)load_image_time)/CLOCKS_PER_SEC);
+
+	clock_t historgram_run_time;
+	historgram_run_time = clock();
+
 	//Compute and print the histogram
-	//histogramCPU(image_in, H, width, height);
-	histogramGPU(image_in, H, width, height, pitch);
-	printHistogram(H);
+	if (target_gpu) {
+		histogramGPU(image_in, H, width, height, pitch);
+	} else {
+		histogramCPU(image_in, H, width, height);
+	}
+	
+	historgram_run_time = clock() - historgram_run_time;
+	printf("Elapsed histogram run time: %f seconds\n", ((double)historgram_run_time)/CLOCKS_PER_SEC);
+
+	// printHistogram(H);
+
+	t = clock() - t;
+	printf("Elapsed total time: %f seconds\n", ((double)t)/CLOCKS_PER_SEC);
 
 	return 0;
 }
+
+/*
+Meritve:
+------------
+
+Čas ~ povprečje 5 meritev
+
+ velikost (WxH) | Čas CPU (tc) [ms] | Čas GPU (tg) [ms] | Čas prenosa vhod [ms]	|  Pohitritev (S)
+---------------------------------------------------------------------------------------------------
+     640x480    |    	0,645     	|    	0,576     	|    	  0,832     	|      1,12    
+     800x600    |    	1,023     	|     	0,739     	|    	  1,302     	|      1,38    
+    1600x900    |    	2,991     	|     	1,369    	|    	  3,174     	|      4,05    
+   1920x1080   	|    	4,333     	|     	1,676     	|    	  3,359     	|      2,59    
+   3840x2160   	|      17,333     	|       5,058     	|    	 11,890     	|      3,43    
+
+tc ~ čas obdelave z serijskim algoritmom na CPU
+tg ~ čas obdelave s paralelnim algoritmom na GPU (brez časa prenosa vhodne slike, priprave programa itd.)
+
+S = tc/tg ~ pohitritev
+
+*/
