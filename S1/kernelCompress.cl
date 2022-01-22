@@ -59,7 +59,15 @@ __kernel void update_centroids(
             sum[2] += image_in[k * 4 + 2];
             count++;
         }
-        if (count > 0)
+        if (count == 0)
+        {
+            // use a sample from the center of the image
+            int center_index = size / 2;
+            centroids[index * 3] = image_in[center_index * 4];
+            centroids[index * 3 + 1] = image_in[center_index * 4 + 1];
+            centroids[index * 3 + 2] = image_in[center_index * 4 + 2];
+        }
+        else
         {
             centroids[index * 3] = sum[0] / count;
             centroids[index * 3 + 1] = sum[1] / count;
