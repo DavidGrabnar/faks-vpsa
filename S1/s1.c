@@ -20,9 +20,11 @@
 #define DEFAULT_CLUSTER_COUNT 64
 #define DEFAULT_ITERATIONS 10
 
-#define DEFAULT_THREAD_COUNT 4
+#define DEFAULT_THREAD_COUNT 16
 
-#define PHI_2D 1.32471795724474602596
+#define SEED 0.5
+#define ALPHA_X 0.7548776662466927
+#define ALPHA_Y 0.5698402909980532
 
 #define WORKGROUP_SIZE (512)
 #define MAX_SOURCE_SIZE 16384
@@ -95,13 +97,11 @@ int main(int argc, char *argv[])
     config.image = &image;
 
     // config
-    //config.image_sizes = (char* []){"640x480"};
     config.image_sizes = (char* []){"640x480", "800x600", "1600x900", "1920x1080", "3840x2160"};
-    //config.image_size_count = 1;
     config.image_size_count = 5;
 
-    config.modes = (int []){1, 2, 3, 4};
-    config.mode_count = 4;
+    config.modes = (int []){1, 2, 3};
+    config.mode_count = 3;
 
     // arguments
     config.cluster_count = DEFAULT_CLUSTER_COUNT;
@@ -195,46 +195,12 @@ void get_output_path(struct config * config, int mode, char * file_name, char * 
         case 3:
             mode_label = "gpu_global";
             break;
-        case 4:
-            mode_label = "gpu_local";
-            break;
         default:
             sprintf(message, "Invalid mode '%d' in get_output_path. Should be in range [1, 4]", mode);
             error(message);
     }
 
     sprintf(file_path, "compressed/%s/%d-%d-%s.png", file_name, config->cluster_count, config->iteration_count, mode_label);
-}
-
-// TODO this is not working ?
-void get_mode_label(char* label, int mode)
-{
-    char message[MESSAGE_MAX_LENGTH];
-
-    label = malloc(32);
-    switch (mode) {
-        case 1:
-            strcpy(label, "cpu_serial");
-            //label = "cpu_serial";
-            break;
-        case 2:
-            strcpy(label, "cpu_parallel");
-            //label = "cpu_parallel";
-            break;
-        case 3:
-            strcpy(label, "gpu_global");
-            //label = "gpu_global";
-            break;
-        case 4:
-            strcpy(label, "gpu_local");
-            //label = "gpu_local";
-            break;
-        default:
-            sprintf(message, "Invalid mode '%d' in get_mode_label. Should be in range [1, 4]", mode);
-            error(message);
-    }
-
-    printf("test %d - %s\n", mode, label);
 }
 
 double** compress(struct config * config)
@@ -299,9 +265,6 @@ void print_durations(struct config * config, double ** durations)
             case 3:
                 mode_label = "gpu_global";
                 break;
-            case 4:
-                mode_label = "gpu_local";
-                break;
             default:
                 mode_label = "unknown";
         }
@@ -334,8 +297,7 @@ void compare_results(struct config * config)
         int size = image_serial.width * image_serial.height;
 
         // starting at 1 to skip serial since we are comparting to it
-        // TODO subtracted 2 to skip GPU until its working
-        for (int mode_index = 1; mode_index < config->mode_count - 1; mode_index++)
+        for (int mode_index = 1; mode_index < config->mode_count; mode_index++)
         {
             char* mode_label;
             switch (config->modes[mode_index]) {
@@ -347,9 +309,6 @@ void compare_results(struct config * config)
                     break;
                 case 3:
                     mode_label = "gpu_global";
-                    break;
-                case 4:
-                    mode_label = "gpu_local";
                     break;
                 default:
                     mode_label = "unknown";
@@ -406,11 +365,6 @@ double run_compress(struct config * config, int mode_index)
             return compress_cpu(config);
         case 3:
             return compress_gpu(config);
-            //printf("TODO: Compress GPU local not implemented yet. Skipping\n");
-            return 0;
-        case 4:
-            printf("TODO: Compress GPU local not implemented yet. Skipping\n");
-            return 0;
         default:
             sprintf(message, "Invalid mode %d. Mode should be in range [1, 4]", config->modes[0]);
             error(message);
@@ -421,22 +375,11 @@ double run_compress(struct config * config, int mode_index)
 // https://math.stackexchange.com/questions/2186861/how-can-we-effectively-generate-a-set-of-evenly-spaced-points-in-a-2d-region
 void initialize_centroids(struct config * config, unsigned char *centroids)
 {
-    double alpha[2];
-    int sizes[2];
-    sizes[0] = config->image->width;
-    sizes[1] = config->image->height;
-
-    for (int i = 0; i < 2; i++) {
-        alpha[i] = fmod(pow(1.0 / PHI_2D, i + 1), 1.0);
-    }
-
-    double seed = 0.5;
-
 #pragma omp for schedule(static, 8)
     for (int i = 0; i < config->cluster_count; i++)
     {
-        int x = fmod(seed + alpha[0] * (i + 1), 1) * sizes[0];
-        int y = fmod(seed + alpha[1] * (i + 1), 1) * sizes[1];
+        int x = fmod(SEED + ALPHA_X * (i + 1), 1) * config->image->width;
+        int y = fmod(SEED + ALPHA_Y * (i + 1), 1) * config->image->height;
 
         int index = y * config->image->width + x;
 
@@ -451,7 +394,9 @@ double compress_cpu(struct config * config)
     int size = config->image->width * config->image->height;
     unsigned char *centroids = (unsigned char *)malloc(config->cluster_count * 3 * sizeof(unsigned char));
     int *cluster_indices = (int *)malloc(size * sizeof(int));
+    unsigned long * aggregates = (unsigned long *) calloc(config->cluster_count * 4, sizeof(unsigned long));
     double start_time;
+    int changed = 0;
 
 #pragma omp parallel
     {
@@ -460,7 +405,8 @@ double compress_cpu(struct config * config)
 
         for (int i = 0; i < config->iteration_count; i++)
         {
-#pragma omp for schedule(static, 1024)
+            changed = 0;
+#pragma omp for schedule(static)
             for (int j = 0; j < size; j++)
             {
                 int min_index = 0;
@@ -468,32 +414,42 @@ double compress_cpu(struct config * config)
                 for (int k = 1; k < config->cluster_count; k++)
                 {
                     int d = distance(config->image->content, centroids, j, k);
-                    if (d < min_distance)
+                    if (d < min_distance && min_index != k)
                     {
                         min_index = k;
                         min_distance = d;
+                        changed = 1;
                     }
                 }
                 cluster_indices[j] = min_index;
             }
-            // TODO rewrite with 2D[clusters][dimensions] sum and 1D[clusters] count array, requires only 1xsize loop + 1xclusters loop
-#pragma omp for schedule(static, 8)
+
+            // if no changes in clasification, break out of iteration and proceed to update image
+            if (!changed) {
+                printf("break out!");
+                break;
+            }
+
+#pragma omp for schedule(static)
+            for (int j = 0; j < config->cluster_count * 4; j++)
+            {
+                aggregates[j] = 0;
+            }
+
+#pragma omp for reduction(+: aggregates[:config->cluster_count * 4])
+            for (int j = 0; j < size; j++)
+            {
+                int idx = cluster_indices[j];
+                aggregates[idx * 4] += config->image->content[j * 4];
+                aggregates[idx * 4 + 1] += config->image->content[j * 4 + 1];
+                aggregates[idx * 4 + 2] += config->image->content[j * 4 + 2];
+                aggregates[idx * 4 + 3]++;
+            }
+
+#pragma omp for schedule(static)
             for (int j = 0; j < config->cluster_count; j++)
             {
-                long sum[3] = {0, 0, 0};
-                int count = 0;
-                for (int k = 0; k < size; k++)
-                {
-                    if (cluster_indices[k] != j)
-                    {
-                        continue;
-                    }
-                    sum[0] += config->image->content[k * 4];
-                    sum[1] += config->image->content[k * 4 + 1];
-                    sum[2] += config->image->content[k * 4 + 2];
-                    count++;
-                }
-                if (count == 0)
+                if (aggregates[j * 4 + 3] == 0)
                 {
                     // use a sample from the center of the image
                     int index = size / 2;
@@ -503,13 +459,14 @@ double compress_cpu(struct config * config)
                 }
                 else 
                 {
-                    centroids[j * 3] = sum[0] / count;
-                    centroids[j * 3 + 1] = sum[1] / count;
-                    centroids[j * 3 + 2] = sum[2] / count;
+                    centroids[j * 3] = aggregates[j * 4] / aggregates[j * 4 + 3];
+                    centroids[j * 3 + 1] = aggregates[j * 4 + 1] / aggregates[j * 4 + 3];
+                    centroids[j * 3 + 2] = aggregates[j * 4 + 2] / aggregates[j * 4 + 3];
                 }
             }
         }
-#pragma omp for schedule(static, 1024)
+
+#pragma omp for schedule(static)
         for (int i = 0; i < size; i++)
         {
             int index = cluster_indices[i];
@@ -521,6 +478,7 @@ double compress_cpu(struct config * config)
 
     free(centroids);
     free(cluster_indices);
+    free(aggregates);
 
     return omp_get_wtime() - start_time;
 }
@@ -543,7 +501,6 @@ double compress_gpu(struct config * config)
     int *cluster_indices = (int *)malloc(size * sizeof(int));
 
     // initialize centroids
-    // todo move to GPU kernel function
     initialize_centroids(config, centroids);
 
     cl_int status;
@@ -569,8 +526,11 @@ double compress_gpu(struct config * config)
     cl_mem centroids_obj = clCreateBuffer(context, CL_MEM_COPY_HOST_PTR, config->cluster_count * 3 * sizeof(unsigned char), centroids, &status);
     cl_error_check(status, "Failed to create centroids buffer");
 
-    cl_mem cluster_indices_obj = clCreateBuffer(context, CL_MEM_WRITE_ONLY, size * sizeof(int), NULL, &status);
+    cl_mem cluster_indices_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, size * sizeof(int), NULL, &status);
     cl_error_check(status, "Failed to create cluster indices buffer");
+
+    cl_mem aggregates_obj = clCreateBuffer(context, CL_MEM_READ_WRITE, config->cluster_count * 4 * sizeof(unsigned int), NULL, &status);
+    cl_error_check(status, "Failed to create aggregates buffer");
 
     cl_program program = clCreateProgramWithSource(context, 1, (const char **)&source, NULL, &status);
     cl_error_check(status, "Failed to create program");
@@ -584,8 +544,8 @@ double compress_gpu(struct config * config)
     build_log = (char *)malloc(sizeof(char) * (build_log_len + 1));
     status |= clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, build_log_len, build_log, NULL);
 
-    free(build_log);
     printf("%s\n", build_log);
+    free(build_log);
     cl_error_check(status, "Failed to build program");
 
     cl_kernel kernel_associate_clusters = clCreateKernel(program, "associate_clusters", &status);
@@ -602,9 +562,19 @@ double compress_gpu(struct config * config)
     status |= clSetKernelArg(kernel_update_centroids, 0, sizeof(cl_mem), (void *)&image_mem_obj);
     status |= clSetKernelArg(kernel_update_centroids, 1, sizeof(cl_mem), (void *)&centroids_obj);
     status |= clSetKernelArg(kernel_update_centroids, 2, sizeof(cl_mem), (void *)&cluster_indices_obj);
-    status |= clSetKernelArg(kernel_update_centroids, 3, sizeof(cl_int), (void *)&size);
-    status |= clSetKernelArg(kernel_update_centroids, 4, sizeof(cl_int), (void *)&config->cluster_count);
+    status |= clSetKernelArg(kernel_update_centroids, 3, sizeof(cl_mem), (void *)&aggregates_obj);
+    status |= clSetKernelArg(kernel_update_centroids, 4, sizeof(cl_int), (void *)&size);
+    status |= clSetKernelArg(kernel_update_centroids, 5, sizeof(cl_int), (void *)&config->cluster_count);
     cl_error_check(status, "Failed to create update_centroids kernel and set arguments");
+
+    cl_kernel kernel_update_values = clCreateKernel(program, "update_values", &status);
+
+    status |= clSetKernelArg(kernel_update_values, 0, sizeof(cl_mem), (void *)&image_mem_obj);
+    status |= clSetKernelArg(kernel_update_values, 1, sizeof(cl_mem), (void *)&centroids_obj);
+    status |= clSetKernelArg(kernel_update_values, 2, sizeof(cl_mem), (void *)&aggregates_obj);
+    status |= clSetKernelArg(kernel_update_values, 3, sizeof(cl_int), (void *)&size);
+    status |= clSetKernelArg(kernel_update_values, 4, sizeof(cl_int), (void *)&config->cluster_count);
+    cl_error_check(status, "Failed to create update_values kernel and set arguments");
 
     for (int i = 0; i < config->iteration_count; i++) {
         status = clEnqueueNDRangeKernel(command_queue, kernel_associate_clusters, 1, NULL, &global_item_size, &local_item_size, 0, NULL, NULL);
@@ -612,6 +582,9 @@ double compress_gpu(struct config * config)
 
         status = clEnqueueNDRangeKernel(command_queue, kernel_update_centroids, 1, NULL, &global_item_size, &local_item_size, 0, NULL, NULL);
         cl_error_check(status, "Failed to run update_centroids");
+
+        status = clEnqueueNDRangeKernel(command_queue, kernel_update_values, 1, NULL, &global_item_size, &local_item_size, 0, NULL, NULL);
+        cl_error_check(status, "Failed to run update_values");
     }
 
     status = clEnqueueReadBuffer(command_queue, cluster_indices_obj, CL_TRUE, 0, size * sizeof(int), cluster_indices, 0, NULL, NULL);
@@ -632,7 +605,6 @@ double compress_gpu(struct config * config)
     status |= clReleaseContext(context);
     cl_error_check(status, "Failed to clear memory");
 
-    // update output TODO reuse input ???
     for (int i = 0; i < size; i++)
     {
         int index = cluster_indices[i];

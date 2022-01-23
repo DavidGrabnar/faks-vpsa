@@ -6,7 +6,6 @@
     return sqrt((double) (x * x + y * y + z * z));
 }
 
-// kernel
 __kernel void associate_clusters(
     __global unsigned char *image_in,
     __global unsigned char *centroids,
@@ -15,7 +14,7 @@ __kernel void associate_clusters(
     int centroid_count
     )
 {
-	int index = get_global_id(0);	
+	int index = get_global_id(0);
 
     if (index < size)
     {
@@ -38,40 +37,55 @@ __kernel void update_centroids(
     __global unsigned char *image_in,
     __global unsigned char *centroids,
     __global int *cluster_indices,
+    __global unsigned int *aggregates,
     int size,
     int centroid_count
     )
 {
 	int index = get_global_id(0);	
     
+    if (index < centroid_count * 4)
+    {
+        aggregates[index] = 0;
+    }
+
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    if (index < size)
+    {
+        int index_cluster = cluster_indices[index];
+        atomic_add(&aggregates[index_cluster * 4], image_in[index * 4]);
+        atomic_add(&aggregates[index_cluster * 4 + 1], image_in[index * 4 + 1]);
+        atomic_add(&aggregates[index_cluster * 4 + 2], image_in[index * 4 + 2]);
+        atomic_add(&aggregates[index_cluster * 4 + 3], 1);
+    }
+}
+
+__kernel void update_values(
+    __global unsigned char *image_in,
+    __global unsigned char *centroids,
+    __global unsigned int *aggregates,
+    int size,
+    int centroid_count
+)
+{
+	int index = get_global_id(0);	
+
     if (index < centroid_count)
     {
-        long sum[3] = {0, 0, 0};
-        int count = 0;
-        for (int k = 0; k < size; k++)
-        {
-            if (cluster_indices[k] != index)
-            {
-                continue;
-            }
-            sum[0] += image_in[k * 4];
-            sum[1] += image_in[k * 4 + 1];
-            sum[2] += image_in[k * 4 + 2];
-            count++;
-        }
-        if (count == 0)
+        if (aggregates[index * 4 + 3] == 0)
         {
             // use a sample from the center of the image
-            int center_index = size / 2;
-            centroids[index * 3] = image_in[center_index * 4];
-            centroids[index * 3 + 1] = image_in[center_index * 4 + 1];
-            centroids[index * 3 + 2] = image_in[center_index * 4 + 2];
+            int index_center = size / 2;
+            centroids[index * 3] = image_in[index_center * 4];
+            centroids[index * 3 + 1] = image_in[index_center * 4 + 1];
+            centroids[index * 3 + 2] = image_in[index_center * 4 + 2];
         }
-        else
+        else 
         {
-            centroids[index * 3] = sum[0] / count;
-            centroids[index * 3 + 1] = sum[1] / count;
-            centroids[index * 3 + 2] = sum[2] / count;
+            centroids[index * 3] = aggregates[index * 4] / aggregates[index * 4 + 3];
+            centroids[index * 3 + 1] = aggregates[index * 4 + 1] / aggregates[index * 4 + 3];
+            centroids[index * 3 + 2] = aggregates[index * 4 + 2] / aggregates[index * 4 + 3];
         }
     }
 }
